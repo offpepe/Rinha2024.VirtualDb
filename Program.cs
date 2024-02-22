@@ -5,11 +5,11 @@ using Rinha2024.VirtualDb;
 
 public class Program
 {
-    private static readonly int range = 10;
-    private static readonly TimeSpan defaultWait = TimeSpan.FromTicks(100);
-    private static ConcurrentQueue<Request> queue = new();
-    private static Dictionary<Guid, int[]> results = new();
-    private static int actualPort = 3000;
+    private const int RANGE = 1000;
+    private const int INITIAL_PORT = 6000;
+    private static readonly TimeSpan DefaultWait = TimeSpan.FromTicks(100);
+    private static readonly ConcurrentQueue<Request> Queue = new();
+    private static readonly ConcurrentDictionary<Guid, int[]> Results = new();
     
     
     public static void Main()
@@ -17,10 +17,10 @@ public class Program
         Console.WriteLine("Server started");
         var queueThread = new Thread(new ThreadStart(QueueHandlerThread));
         queueThread.Start();
-        
-        while (true)
+        for (var i = 0; i < RANGE; i++)
         {
-            new Thread(new ThreadStart(TryGetRequest)).Start();
+            var thread = new Thread(new ParameterizedThreadStart(TryGetRequest));
+            thread.Start(new TcpListener(IPAddress.Any, INITIAL_PORT + i));
         }
     }
     
@@ -29,9 +29,9 @@ public class Program
         var vdb = new VirtualDatabase();
         while (true)
         {
-            if (!queue.TryDequeue(out var req))
+            if (!Queue.TryDequeue(out var req))
             {
-                Thread.Sleep(defaultWait);
+                Thread.Sleep(DefaultWait);
                 continue;
             }
             if (req.Read)
@@ -41,55 +41,72 @@ public class Program
                 TryWriteResult(req.OperationId,client);
                 continue;
             }
+
             var parameters = req.ReadTransactionParams();
-            if (parameters == null) continue;
-            var type = parameters[2] > 0 ? 'c' : 'd';
-            TryWriteResult(req.OperationId, vdb.DoTransaction(ref parameters[1], ref type, ref parameters[3]));
+            if (parameters == null)
+            {
+                TryWriteResult(req.OperationId, [0,0]);
+                continue;
+            }
+            var type = parameters[1] > 0 ? 'c' : 'd';
+            TryWriteResult(req.OperationId, vdb.DoTransaction(ref parameters[0], ref type, ref parameters[1]));
         }
     }
+    
 
-
-    private static void TryGetRequest()
+    private static void TryGetRequest(object? obj)
     {
-        using var listener = new TcpListener(IPAddress.Any, actualPort);
+        if (obj is not TcpListener listener) throw new ApplicationException("Error while opening TCP listener");
+        Console.WriteLine("listening on {0}", listener.LocalEndpoint);
         listener.Start();
-        using var client = listener.AcceptTcpClient();
-        using var stream = client.GetStream();
-        var buffer = new byte[1024];
-        var bytesToRead = stream.Read(buffer);
-        if (bytesToRead == 0)
+        var client = listener.AcceptTcpClient();
+        while (true)
         {
-            Console.WriteLine("no data | thread: {0}", Thread.CurrentThread.Name);
-            return;
-        }
-
-        var parameters = new int[4];
-        Buffer.BlockCopy(buffer, 0, parameters, 0, bytesToRead);
-        var id = Guid.NewGuid();
-        int[] result;
-        if (parameters[0] == 0)
-        {
-            queue.Enqueue(new Request()
+            if (!client.Connected)
             {
-                Read = true,
-                Parameter = parameters[1],
+                client = listener.AcceptTcpClient();
+            }
+            var stream = client.GetStream();
+            var parameters = new int[2];
+            var buffer = new byte[16];
+            var bytes = stream.Read(buffer);
+            parameters[0] = BitConverter.ToInt32(buffer);
+            bytes =  stream.Read(buffer);
+            parameters[1] = BitConverter.ToInt32(buffer);
+            var id = Guid.NewGuid();
+            int[] result;
+            if (parameters[0] == 0)
+            {
+                Queue.Enqueue(new Request()
+                {
+                    Read = true,
+                    Parameter = parameters[1],
+                    OperationId = id
+                });
+                result = AwaitResponse(id);
+                SendData(result, stream);
+                Console.WriteLine("READ REQUEST SUCCESS | ID: {0} - RESULT: {1} - TUNNEL: {2} ", id, string.Join(',', result), listener.LocalEndpoint);
+                continue;
+            }
+
+            Queue.Enqueue(new Request()
+            {
+                Read = false,
+                Parameter = parameters,
                 OperationId = id
             });
-            result = AwaitResponse(id);
-            SendData(result, stream);
-            Console.WriteLine("READ REQUEST SUCCESS | ID: {0} - RESULT: {1} ", id, string.Join(',', result));
-            return;
+            try
+            {
+                result = AwaitResponse(id);
+                SendData(result, stream);
+            }
+            catch
+            {
+                Console.WriteLine("Error while reading stream | ID: {0} - TUNNEL: {1} ", id, listener.LocalEndpoint);
+                continue;
+            }
+            Console.WriteLine("WRITE REQUEST SUCCESS | ID: {0} - RESULT: {1} - TUNNEL: {2} ", id, string.Join(',', result), listener.LocalEndpoint);
         }
-
-        queue.Enqueue(new Request()
-        {
-            Read = false,
-            Parameter = parameters,
-            OperationId = id
-        });
-        result = AwaitResponse(id);
-        SendData(result, stream);
-        Console.WriteLine("WRITE REQUEST SUCCESS | ID: {0} - RESULT: {1} ", id, string.Join(',', result));
     } 
     
     private static int[] AwaitResponse(Guid id)
@@ -98,10 +115,9 @@ public class Program
         int[]? result = null;
         while (!finished)
         {
-            finished = results.TryGetValue(id, out result);
+            finished = Results.Remove(id, out result);
             if (result != null) break;
         }
-        results.Remove(id);
         return result!;
     }
 
@@ -111,10 +127,10 @@ public class Program
         {
             try
             {
-                results.Add(id, data);
+                Results.TryAdd(id, data);
                 break;
             }
-            catch (IndexOutOfRangeException _)
+            catch (OverflowException _)
             {
                 //ignore
             }
@@ -129,8 +145,6 @@ public class Program
             stream.Write(buffer);
         }
     }
-
-
     
-    
+
 }

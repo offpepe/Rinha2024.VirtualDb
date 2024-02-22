@@ -23,7 +23,7 @@ public class VirtualDatabase
     {
         var client = GetClient(ref idx);
         var isDebit = type == 'd';
-        var newBalance = isDebit ? client[0] - value : client[0] + value;
+        var newBalance = client[0] + value;
         if (isDebit && -newBalance > client[1]) return _unprocessable;
         client[0] = newBalance;
         return client;
