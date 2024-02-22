@@ -1,0 +1,1 @@
+﻿docker build -t alanlopes/vdb-rinha-2024q1-dotnet .
