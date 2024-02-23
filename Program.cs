@@ -5,8 +5,8 @@ using Rinha2024.VirtualDb;
 
 public class Program
 {
-    private const int RANGE = 1000;
-    private const int INITIAL_PORT = 6000;
+    private static readonly int Range =  int.TryParse(Environment.GetEnvironmentVariable("CONNECTION_RANGE"), out var connectionRange) ? connectionRange : 3000;
+    private static readonly int InitialPort = int.TryParse(Environment.GetEnvironmentVariable("BASE_PORT"), out var basePort) ? basePort : 6000;
     private static readonly TimeSpan DefaultWait = TimeSpan.FromTicks(100);
     private static readonly ConcurrentQueue<Request> Queue = new();
     private static readonly ConcurrentDictionary<Guid, int[]> Results = new();
@@ -17,10 +17,10 @@ public class Program
         Console.WriteLine("Server started");
         var queueThread = new Thread(new ThreadStart(QueueHandlerThread));
         queueThread.Start();
-        for (var i = 0; i < RANGE; i++)
+        for (var i = 0; i < Range; i++)
         {
             var thread = new Thread(new ParameterizedThreadStart(TryGetRequest));
-            thread.Start(new TcpListener(IPAddress.Any, INITIAL_PORT + i));
+            thread.Start(new TcpListener(IPAddress.Any, InitialPort + i));
         }
     }
     
