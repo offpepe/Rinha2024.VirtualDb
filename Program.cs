@@ -5,13 +5,24 @@ using Rinha2024.VirtualDb;
 
 public class Program
 {
-    private static readonly int Range =  int.TryParse(Environment.GetEnvironmentVariable("CONNECTION_RANGE"), out var connectionRange) ? connectionRange : 3000;
-    private static readonly int InitialPort = int.TryParse(Environment.GetEnvironmentVariable("BASE_PORT"), out var basePort) ? basePort : 6000;
+    private static readonly bool NoDelay =
+        bool.TryParse(Environment.GetEnvironmentVariable("NO_DELAY"), out var noDelay) && noDelay;
+
+    private static readonly int Range =
+        int.TryParse(Environment.GetEnvironmentVariable("CONNECTION_RANGE"), out var connectionRange)
+            ? connectionRange
+            : 2;
+
+    private static readonly int InitialPort =
+        int.TryParse(Environment.GetEnvironmentVariable("BASE_PORT"), out var basePort) ? basePort : 10000;
+
     private static readonly TimeSpan DefaultWait = TimeSpan.FromTicks(100);
     private static readonly ConcurrentQueue<Request> Queue = new();
     private static readonly ConcurrentDictionary<Guid, int[]> Results = new();
-    
-    
+    private static readonly ConcurrentStack<TcpListener> OpenedListenersStack = new();
+    private static readonly ConcurrentQueue<int> ClosedPortsStack = new();
+
+
     public static void Main()
     {
         Console.WriteLine("Server started");
@@ -20,10 +31,34 @@ public class Program
         for (var i = 0; i < Range; i++)
         {
             var thread = new Thread(new ParameterizedThreadStart(TryGetRequest));
-            thread.Start(new TcpListener(IPAddress.Any, InitialPort + i));
+            thread.Start(InitialPort + i);
+        }
+        var deadPortsStack = new Thread(new ThreadStart(ListenerHandlerProcess));
+        deadPortsStack.Start();
+    }
+
+    private static void ListenerHandlerProcess()
+    {
+        Console.WriteLine("started to handle processes");
+        while (true)
+        {
+            if (ClosedPortsStack.IsEmpty)
+            {
+                Thread.Sleep(TimeSpan.FromTicks(100));
+                continue;
+            }
+            var gotListener = ClosedPortsStack.TryDequeue(out var port);
+            if (!gotListener)
+            {
+                Thread.Sleep(TimeSpan.FromTicks(100));
+                continue;
+            }
+            Console.WriteLine("process {0} reopened", port);
+            var thread = new Thread(new ParameterizedThreadStart(TryGetRequest));
+            thread.Start(port);
         }
     }
-    
+
     private static void QueueHandlerThread()
     {
         var vdb = new VirtualDatabase();
@@ -34,44 +69,50 @@ public class Program
                 Thread.Sleep(DefaultWait);
                 continue;
             }
+
             if (req.Read)
             {
                 var idx = req.ReadIndex();
                 var client = vdb.GetClient(ref idx);
-                TryWriteResult(req.OperationId,client);
+                TryWriteResult(req.OperationId, client);
                 continue;
             }
 
             var parameters = req.ReadTransactionParams();
             if (parameters == null)
             {
-                TryWriteResult(req.OperationId, [0,0]);
+                TryWriteResult(req.OperationId, [0, 0]);
                 continue;
             }
+
             var type = parameters[1] > 0 ? 'c' : 'd';
             TryWriteResult(req.OperationId, vdb.DoTransaction(ref parameters[0], ref type, ref parameters[1]));
         }
     }
-    
+
 
     private static void TryGetRequest(object? obj)
     {
-        if (obj is not TcpListener listener) throw new ApplicationException("Error while opening TCP listener");
-        Console.WriteLine("listening on {0}", listener.LocalEndpoint);
+        if (obj is not int port) throw new ApplicationException("Error while opening TCP listener");
+        using var listener = new TcpListener(IPAddress.Any, port);
+        listener.ExclusiveAddressUse = true;
+        listener.Server.NoDelay = NoDelay;
+        listener.Server.Ttl = 255;
         listener.Start();
-        var client = listener.AcceptTcpClient();
-        while (true)
+        try
         {
-            if (!client.Connected)
-            {
-                client = listener.AcceptTcpClient();
-            }
-            var stream = client.GetStream();
+            Console.WriteLine("process {0} is available", listener.LocalEndpoint);
+            using var client = listener.AcceptTcpClient();
+            client.ReceiveTimeout = 3000;
+            client.ReceiveBufferSize = 8;
+            Console.WriteLine("process {0} got request", listener.LocalEndpoint);
+            Console.WriteLine(client.Available);
+            using var stream = client.GetStream();
             var parameters = new int[2];
-            var buffer = new byte[16];
-            var bytes = stream.Read(buffer);
+            var buffer = new byte[8];
+            _ = stream.Read(buffer);
             parameters[0] = BitConverter.ToInt32(buffer);
-            bytes =  stream.Read(buffer);
+            _ = stream.Read(buffer);
             parameters[1] = BitConverter.ToInt32(buffer);
             var id = Guid.NewGuid();
             int[] result;
@@ -85,8 +126,11 @@ public class Program
                 });
                 result = AwaitResponse(id);
                 SendData(result, stream);
-                Console.WriteLine("READ REQUEST SUCCESS | ID: {0} - RESULT: {1} - TUNNEL: {2} ", id, string.Join(',', result), listener.LocalEndpoint);
-                continue;
+                Console.WriteLine("READ REQUEST SUCCESS | ID: {0} - RESULT: {1} - TUNNEL: {2} ", id,
+                    string.Join(',', result), listener.LocalEndpoint);
+                listener.Stop();
+                ClosedPortsStack.Enqueue(port);
+                return;
             }
 
             Queue.Enqueue(new Request()
@@ -95,20 +139,21 @@ public class Program
                 Parameter = parameters,
                 OperationId = id
             });
-            try
-            {
-                result = AwaitResponse(id);
-                SendData(result, stream);
-            }
-            catch
-            {
-                Console.WriteLine("Error while reading stream | ID: {0} - TUNNEL: {1} ", id, listener.LocalEndpoint);
-                continue;
-            }
-            Console.WriteLine("WRITE REQUEST SUCCESS | ID: {0} - RESULT: {1} - TUNNEL: {2} ", id, string.Join(',', result), listener.LocalEndpoint);
+            result = AwaitResponse(id);
+            SendData(result, stream);
+            Console.WriteLine("WRITE REQUEST SUCCESS | ID: {0} - RESULT: {1} - TUNNEL: {2} ", id,
+                string.Join(',', result),
+                listener.LocalEndpoint);
+            ClosedPortsStack.Enqueue(port);
+            listener.Stop();
         }
-    } 
-    
+        catch (IOException _)
+        {
+            listener.Stop();
+            ClosedPortsStack.Enqueue(port);
+        }
+    }
+
     private static int[] AwaitResponse(Guid id)
     {
         var finished = false;
@@ -118,6 +163,7 @@ public class Program
             finished = Results.Remove(id, out result);
             if (result != null) break;
         }
+
         return result!;
     }
 
@@ -146,5 +192,5 @@ public class Program
         }
     }
     
-
+    
 }
