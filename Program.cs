@@ -1,25 +1,17 @@
 ﻿using System.Collections.Concurrent;
 using System.Net;
 using System.Net.Sockets;
-using Rinha2024.VirtualDb;
+using Rinha2024.Dotnet.IO;
+
+namespace Rinha2024.VirtualDb;
 
 public class Program
 {
-    private static readonly bool NoDelay =
-        bool.TryParse(Environment.GetEnvironmentVariable("NO_DELAY"), out var noDelay) && noDelay;
-
-    private static readonly int Range =
-        int.TryParse(Environment.GetEnvironmentVariable("CONNECTION_RANGE"), out var connectionRange)
-            ? connectionRange
-            : 2;
-
-    private static readonly int InitialPort =
-        int.TryParse(Environment.GetEnvironmentVariable("BASE_PORT"), out var basePort) ? basePort : 10000;
-
+    private static readonly int Range = int.TryParse(Environment.GetEnvironmentVariable("CONNECTION_RANGE"), out var connectionRange) ? connectionRange : 500;
+    private static readonly int InitialPort = int.TryParse(Environment.GetEnvironmentVariable("BASE_PORT"), out var basePort) ? basePort : 7000;
     private static readonly TimeSpan DefaultWait = TimeSpan.FromTicks(100);
     private static readonly ConcurrentQueue<Request> Queue = new();
     private static readonly ConcurrentDictionary<Guid, int[]> Results = new();
-    private static readonly ConcurrentStack<TcpListener> OpenedListenersStack = new();
     private static readonly ConcurrentQueue<int> ClosedPortsStack = new();
 
 
@@ -28,13 +20,15 @@ public class Program
         Console.WriteLine("Server started");
         var queueThread = new Thread(new ThreadStart(QueueHandlerThread));
         queueThread.Start();
+        var deadPortsStack = new Thread(new ThreadStart(ListenerHandlerProcess));
+        deadPortsStack.Start();
+        
         for (var i = 0; i < Range; i++)
         {
             var thread = new Thread(new ParameterizedThreadStart(TryGetRequest));
-            thread.Start(InitialPort + i);
+            thread.Start();
         }
-        var deadPortsStack = new Thread(new ThreadStart(ListenerHandlerProcess));
-        deadPortsStack.Start();
+        
     }
 
     private static void ListenerHandlerProcess()
@@ -44,16 +38,17 @@ public class Program
         {
             if (ClosedPortsStack.IsEmpty)
             {
-                Thread.Sleep(TimeSpan.FromTicks(100));
+                Thread.Sleep(TimeSpan.FromTicks(300));
                 continue;
             }
+
             var gotListener = ClosedPortsStack.TryDequeue(out var port);
             if (!gotListener)
             {
-                Thread.Sleep(TimeSpan.FromTicks(100));
+                Thread.Sleep(TimeSpan.FromTicks(300));
                 continue;
             }
-            Console.WriteLine("process {0} reopened", port);
+
             var thread = new Thread(new ParameterizedThreadStart(TryGetRequest));
             thread.Start(port);
         }
@@ -96,24 +91,19 @@ public class Program
         if (obj is not int port) throw new ApplicationException("Error while opening TCP listener");
         using var listener = new TcpListener(IPAddress.Any, port);
         listener.ExclusiveAddressUse = true;
-        listener.Server.NoDelay = NoDelay;
-        listener.Server.Ttl = 255;
+        listener.Server.NoDelay = true;
         listener.Start();
         try
-        {
+        {   
+#if !ON_CLUSTER 
             Console.WriteLine("process {0} is available", listener.LocalEndpoint);
+#endif
             using var client = listener.AcceptTcpClient();
-            client.ReceiveTimeout = 3000;
-            client.ReceiveBufferSize = 8;
+#if !ON_CLUSTER 
             Console.WriteLine("process {0} got request", listener.LocalEndpoint);
-            Console.WriteLine(client.Available);
+#endif
             using var stream = client.GetStream();
-            var parameters = new int[2];
-            var buffer = new byte[8];
-            _ = stream.Read(buffer);
-            parameters[0] = BitConverter.ToInt32(buffer);
-            _ = stream.Read(buffer);
-            parameters[1] = BitConverter.ToInt32(buffer);
+            var parameters = stream.ReadMessage();
             var id = Guid.NewGuid();
             int[] result;
             if (parameters[0] == 0)
@@ -126,8 +116,11 @@ public class Program
                 });
                 result = AwaitResponse(id);
                 SendData(result, stream);
+#if !ON_CLUSTER 
                 Console.WriteLine("READ REQUEST SUCCESS | ID: {0} - RESULT: {1} - TUNNEL: {2} ", id,
+#endif
                     string.Join(',', result), listener.LocalEndpoint);
+                stream.Close();
                 listener.Stop();
                 ClosedPortsStack.Enqueue(port);
                 return;
@@ -141,10 +134,13 @@ public class Program
             });
             result = AwaitResponse(id);
             SendData(result, stream);
+#if !ON_CLUSTER 
             Console.WriteLine("WRITE REQUEST SUCCESS | ID: {0} - RESULT: {1} - TUNNEL: {2} ", id,
+#endif
                 string.Join(',', result),
                 listener.LocalEndpoint);
             ClosedPortsStack.Enqueue(port);
+            stream.Close();
             listener.Stop();
         }
         catch (IOException _)
@@ -161,6 +157,7 @@ public class Program
         while (!finished)
         {
             finished = Results.Remove(id, out result);
+            Thread.Sleep(TimeSpan.FromTicks(10));
             if (result != null) break;
         }
 
@@ -169,28 +166,27 @@ public class Program
 
     private static void TryWriteResult(Guid id, int[] data)
     {
-        while (true)
+        var gotResult = false;
+        while (!gotResult)
         {
             try
             {
-                Results.TryAdd(id, data);
+                gotResult = Results.TryAdd(id, data);
                 break;
             }
             catch (OverflowException _)
             {
                 //ignore
             }
+            Thread.Sleep(TimeSpan.FromTicks(10));
         }
     }
 
     private static void SendData(int[] data, NetworkStream stream)
     {
-        for (var i = 0; i < data.Length; i++)
-        {
-            var buffer = BitConverter.GetBytes(data[i]);
-            stream.Write(buffer);
-        }
+        var buffer = PacketBuilder.WriteMessage(data);
+        stream.Write(buffer);
     }
     
-    
+
 }

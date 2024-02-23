@@ -6,10 +6,10 @@ RUN apt update
 RUN apt install -y clang zlib1g-dev
 WORKDIR /src
 COPY ["Rinha2024.VirtualDb.csproj", "./"]
-RUN dotnet restore "Rinha2024.VirtualDb.csproj"
+RUN dotnet restore "Rinha2024.VirtualDb.csproj" -p:ON_CLUSTER=true
 COPY . .
 WORKDIR "/src/"
-RUN dotnet build "Rinha2024.VirtualDb.csproj" -c Release -o /app/build
+RUN dotnet build "Rinha2024.VirtualDb.csproj" -p:ON_CLUSTER=true -c Release -o /app/build
 
 FROM build AS publish
 RUN dotnet publish "Rinha2024.VirtualDb.csproj" -c Release -o /app/publish /p:UseAppHost=true
