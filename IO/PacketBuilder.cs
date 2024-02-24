@@ -3,7 +3,7 @@
 public static class PacketBuilder
 {
     
-    public static byte[] WriteMessage(int[] message)
+    public static byte[] WriteMessage(ref int[] message)
     {
         using var ms = new MemoryStream();
         foreach (var item in message)

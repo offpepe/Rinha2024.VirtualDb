@@ -7,28 +7,32 @@ namespace Rinha2024.VirtualDb;
 
 public class Program
 {
-    private static readonly int Range = int.TryParse(Environment.GetEnvironmentVariable("CONNECTION_RANGE"), out var connectionRange) ? connectionRange : 500;
-    private static readonly int InitialPort = int.TryParse(Environment.GetEnvironmentVariable("BASE_PORT"), out var basePort) ? basePort : 7000;
-    private static readonly TimeSpan DefaultWait = TimeSpan.FromTicks(100);
+    private static readonly int Range =
+        int.TryParse(Environment.GetEnvironmentVariable("CONNECTION_RANGE"), out var connectionRange)
+            ? connectionRange
+            : 1;
+
+    private static readonly int InitialPort =
+        int.TryParse(Environment.GetEnvironmentVariable("BASE_PORT"), out var basePort) ? basePort : 7000;
+
+    private static readonly TimeSpan DefaultWait = TimeSpan.FromTicks(10);
     private static readonly ConcurrentQueue<Request> Queue = new();
     private static readonly ConcurrentDictionary<Guid, int[]> Results = new();
     private static readonly ConcurrentQueue<int> ClosedPortsStack = new();
+    private static readonly VirtualDatabase Vdb = new();
 
 
     public static void Main()
     {
-        Console.WriteLine("Server started");
-        var queueThread = new Thread(new ThreadStart(QueueHandlerThread));
+        var queueThread = new Thread(QueueHandlerThread);
         queueThread.Start();
-        var deadPortsStack = new Thread(new ThreadStart(ListenerHandlerProcess));
+        var deadPortsStack = new Thread(ListenerHandlerProcess);
         deadPortsStack.Start();
-        
         for (var i = 0; i < Range; i++)
         {
-            var thread = new Thread(new ParameterizedThreadStart(TryGetRequest));
-            thread.Start();
+            ClosedPortsStack.Enqueue(InitialPort + i);
         }
-        
+        Console.WriteLine("Server started");
     }
 
     private static void ListenerHandlerProcess()
@@ -38,37 +42,34 @@ public class Program
         {
             if (ClosedPortsStack.IsEmpty)
             {
-                Thread.Sleep(TimeSpan.FromTicks(300));
                 continue;
             }
 
             var gotListener = ClosedPortsStack.TryDequeue(out var port);
             if (!gotListener)
             {
-                Thread.Sleep(TimeSpan.FromTicks(300));
                 continue;
             }
 
-            var thread = new Thread(new ParameterizedThreadStart(TryGetRequest));
+            var thread = new Thread(TryGetRequest);
             thread.Start(port);
         }
     }
 
     private static void QueueHandlerThread()
     {
-        var vdb = new VirtualDatabase();
+        
         while (true)
         {
             if (!Queue.TryDequeue(out var req))
             {
-                Thread.Sleep(DefaultWait);
                 continue;
             }
 
             if (req.Read)
             {
                 var idx = req.ReadIndex();
-                var client = vdb.GetClient(ref idx);
+                var client = Vdb.GetClient(ref idx);
                 TryWriteResult(req.OperationId, client);
                 continue;
             }
@@ -80,8 +81,7 @@ public class Program
                 continue;
             }
 
-            var type = parameters[1] > 0 ? 'c' : 'd';
-            TryWriteResult(req.OperationId, vdb.DoTransaction(ref parameters[0], ref type, ref parameters[1]));
+            TryWriteResult(req.OperationId, Vdb.DoTransaction(ref parameters[0], ref parameters[1]));
         }
     }
 
@@ -89,17 +89,17 @@ public class Program
     private static void TryGetRequest(object? obj)
     {
         if (obj is not int port) throw new ApplicationException("Error while opening TCP listener");
-        using var listener = new TcpListener(IPAddress.Any, port);
-        listener.ExclusiveAddressUse = true;
-        listener.Server.NoDelay = true;
-        listener.Start();
         try
-        {   
-#if !ON_CLUSTER 
+        {
+            using var listener = new TcpListener(IPAddress.Any, port);
+            listener.ExclusiveAddressUse = true;
+            listener.Server.NoDelay = true;
+            listener.Start();
+#if !ON_CLUSTER
             Console.WriteLine("process {0} is available", listener.LocalEndpoint);
 #endif
             using var client = listener.AcceptTcpClient();
-#if !ON_CLUSTER 
+#if !ON_CLUSTER
             Console.WriteLine("process {0} got request", listener.LocalEndpoint);
 #endif
             using var stream = client.GetStream();
@@ -108,19 +108,12 @@ public class Program
             int[] result;
             if (parameters[0] == 0)
             {
-                Queue.Enqueue(new Request()
-                {
-                    Read = true,
-                    Parameter = parameters[1],
-                    OperationId = id
-                });
-                result = AwaitResponse(id);
+
+                result = Vdb.GetClient(ref parameters[1]);
                 SendData(result, stream);
-#if !ON_CLUSTER 
-                Console.WriteLine("READ REQUEST SUCCESS | ID: {0} - RESULT: {1} - TUNNEL: {2} ", id,
+#if !ON_CLUSTER
+                Console.WriteLine("READ REQUEST SUCCESS | ID: {0} - RESULT: {1} - TUNNEL: {2} ", id,string.Join(',', result), listener.LocalEndpoint);
 #endif
-                    string.Join(',', result), listener.LocalEndpoint);
-                stream.Close();
                 listener.Stop();
                 ClosedPortsStack.Enqueue(port);
                 return;
@@ -134,18 +127,14 @@ public class Program
             });
             result = AwaitResponse(id);
             SendData(result, stream);
-#if !ON_CLUSTER 
-            Console.WriteLine("WRITE REQUEST SUCCESS | ID: {0} - RESULT: {1} - TUNNEL: {2} ", id,
+#if !ON_CLUSTER
+            Console.WriteLine("WRITE REQUEST SUCCESS | ID: {0} - RESULT: {1} - TUNNEL: {2} ", id,string.Join(',', result), listener.LocalEndpoint);
 #endif
-                string.Join(',', result),
-                listener.LocalEndpoint);
             ClosedPortsStack.Enqueue(port);
-            stream.Close();
             listener.Stop();
         }
         catch (IOException _)
         {
-            listener.Stop();
             ClosedPortsStack.Enqueue(port);
         }
     }
@@ -178,15 +167,14 @@ public class Program
             {
                 //ignore
             }
+
             Thread.Sleep(TimeSpan.FromTicks(10));
         }
     }
 
     private static void SendData(int[] data, NetworkStream stream)
     {
-        var buffer = PacketBuilder.WriteMessage(data);
+        var buffer = PacketBuilder.WriteMessage(ref data);
         stream.Write(buffer);
     }
-    
-
 }

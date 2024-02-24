@@ -19,10 +19,11 @@ public class VirtualDatabase
     public int Size => _clients.Length;
     public ref int[] GetClient(ref int idx) => ref _clients[idx];
 
-    public int[] DoTransaction(ref int idx, ref char type, ref int value)
+
+    public int[] DoTransaction(ref int idx, ref int value)
     {
         var client = GetClient(ref idx);
-        var isDebit = type == 'd';
+        var isDebit = value < 0;
         var newBalance = client[0] + value;
         if (isDebit && -newBalance > client[1]) return _unprocessable;
         client[0] = newBalance;
