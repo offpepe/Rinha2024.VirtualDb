@@ -7,7 +7,7 @@ public static class PacketReader
 {
     public static Program.SocketMessage ReadMessage(this NetworkStream stream)
     {
-        var receivedBuffer = new byte[18];
+        var receivedBuffer = new byte[28];
         var result = new int[2];
         _ = stream.Read(receivedBuffer);
         for (var i = 0; i < 2; i++)
@@ -17,7 +17,12 @@ public static class PacketReader
         string? description = null;
         if (result[0] > 0)
         {
-            description = BitConverter.ToString(receivedBuffer, 8);
+            var pos = 8;
+            for (int i = 0; i < 10; i++)
+            {
+                description += BitConverter.ToChar(receivedBuffer, pos);
+                pos+=2;
+            }
         }
         return new Program.SocketMessage(result, description);
     }
