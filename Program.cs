@@ -1,4 +1,5 @@
 ﻿using System.Collections.Concurrent;
+using System.Globalization;
 using System.Net.Sockets;
 using Rinha2024.Dotnet.IO;
 using Rinha2024.VirtualDb.IO;
@@ -13,7 +14,7 @@ public class Program
             : 3000;
 
     private static readonly int BasePort =
-        int.TryParse(Environment.GetEnvironmentVariable("BASE_PORT"), out var basePort) ? basePort : 7000;
+        int.TryParse(Environment.GetEnvironmentVariable("BASE_PORT"), out var basePort) ? basePort : 30000;
 
     private static readonly ConcurrentQueue<TransactionRequest> TransactionQueue = new();
     private static readonly ConcurrentDictionary<Guid, int[]> Results = new();
@@ -27,11 +28,11 @@ public class Program
         queueThread.Start();
         var deadPortsStack = new Thread(ListenerHandlerProcess);
         deadPortsStack.Start();
-        for (var i = 0; i < Range; i++)
+        Parallel.For(0, Range, i =>
         {
             var thread = new Thread(Listen);
             thread.Start(BasePort + i);
-        }
+        });
         Console.WriteLine("Server started");
     }
 
@@ -78,15 +79,18 @@ public class Program
                 TryWriteResult(req.Id, [0,0]);
                 return;
             }
-            var newBalance = client!.Value + req.Parameters[1];
+            var value = req.Parameters[1];
+            var newBalance = client!.Value + value;
             var isDebit = req.Parameters[1] < 0; 
             if (isDebit && -newBalance > client.Limit)
             {
                 TryWriteResult(req.Id, [0,-1]);
                 return;
             }
+            var transaction = new Transaction(isDebit ? -value : value, isDebit ? 'd' : 'c', req.Description,
+                DateTime.Now.ToString(CultureInfo.InvariantCulture));
             client.SetValue(newBalance);
-            client.Transactions.AddFirst(new Transaction(req.Parameters[1], isDebit ? 'd' : 'c', req.Description));
+            client.AddTransaction(transaction);
             TryWriteResult(req.Id, [newBalance, client.Limit]);
         }
     }
@@ -129,31 +133,31 @@ public class Program
      private static void Listen(object? state)
      {
          if (state is not int port) throw new ApplicationException("Invalid state while setting up TCP listener");
-         var listener = TcpListener.Create(port);
+         using var listener = TcpListener.Create(port);
          listener.Start();
          Console.WriteLine("[{0}] Process opened", listener.LocalEndpoint);
-         var client = listener.AcceptTcpClient();
-         var stream = client.GetStream();
+         using var client = listener.AcceptTcpClient();
+         using var stream = client.GetStream();
          while (true)
          {
              try
              {
-                 var message = stream.ReadMessage();
-                 var parameters = message.Parameters;
+                 var (parameters, description) = stream.ReadMessage();
                  int[] result;
                  switch (parameters[0])
                  {
                      case 0:
-                         var found = Clients.TryGetValue(parameters[1], out var clientData);
-                         result = found ? [clientData!.Value, clientData.Limit] : [0,0];
+                         _ = Clients.TryGetValue(parameters[1], out var clientData);
+                         result = [clientData!.Value, clientData.Limit];
+                         stream.Write(PacketBuilder.WriteMessage(ref result, clientData.Transactions));
                          break;
                      default:
                          var id = Guid.NewGuid();
-                         TransactionQueue.Enqueue(new TransactionRequest(id, parameters, message.description ?? string.Empty));
+                         TransactionQueue.Enqueue(new TransactionRequest(id, parameters, description ?? string.Empty));
                          result = AwaitResponse(id);
+                         stream.Write(PacketBuilder.WriteMessage(ref result));
                          break;
                  }
-                 stream.Write(PacketBuilder.WriteMessage(ref result));
              }
              catch (Exception e) when (e is SocketException or IOException or InvalidOperationException)
              {
@@ -186,10 +190,24 @@ public class Program
          public int Value { get; set; }
          public int Limit { get; set; }
          public LinkedList<Transaction> Transactions { get; set; } = [];
-
          public void SetValue(int newBalance) => this.Value = newBalance;
+
+         public void AddTransaction(Transaction transaction)
+         {
+             Transactions.AddFirst(transaction);
+             while (Transactions.Count > 10)
+             {
+                 Transactions.RemoveLast();
+             }
+         }
+
+         public IEnumerable<Transaction> GetTransactions(int count)
+         {
+             if (Transactions.Count < count) count = Transactions.Count;
+             for (var i = 0; i < count; i++) yield return Transactions.ElementAt(i);
+         }
      };
-     public readonly record struct Transaction(int valor, char tipo, string descricao);
+     public readonly record struct Transaction(int Value, char Type, string Description, string CreatedAt);
      public readonly record struct TransactionRequest(Guid Id, int[] Parameters, string Description);
 
      public readonly record struct SocketMessage(int[] Parameters, string? description);
