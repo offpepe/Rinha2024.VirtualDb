@@ -1,5 +1,6 @@
 ﻿using System.Collections.Concurrent;
 using System.Globalization;
+using System.Net;
 using System.Net.Sockets;
 using Rinha2024.Dotnet.IO;
 using Rinha2024.VirtualDb.IO;
@@ -8,17 +9,9 @@ namespace Rinha2024.VirtualDb;
 
 public class Program
 {
-    private static readonly int Range =
-        int.TryParse(Environment.GetEnvironmentVariable("CONNECTION_RANGE"), out var connectionRange)
-            ? connectionRange
-            : 3000;
-
-    private static readonly int BasePort =
-        int.TryParse(Environment.GetEnvironmentVariable("BASE_PORT"), out var basePort) ? basePort : 30000;
-
+    private static readonly int MainPort = int.TryParse(Environment.GetEnvironmentVariable("BASE_PORT"), out var basePort) ? basePort : 30000;
     private static readonly ConcurrentQueue<TransactionRequest> TransactionQueue = new();
     private static readonly ConcurrentDictionary<Guid, int[]> Results = new();
-    private static readonly ConcurrentQueue<int> DeafQueue = new();
     private static readonly ConcurrentDictionary<int, ClientData> Clients = new();
 
     public static void Main()
@@ -26,45 +19,51 @@ public class Program
         SetupClients();
         var queueThread = new Thread(QueueHandlerThread);
         queueThread.Start();
-        var deadPortsStack = new Thread(ListenerHandlerProcess);
-        deadPortsStack.Start();
-        Parallel.For(0, Range, i =>
+        for (var i = 0; i < 5; i++)
         {
-            var thread = new Thread(Listen);
-            thread.Start(BasePort + i);
-        });
-        Console.WriteLine("Server started");
-    }
-
-    private static void ListenerHandlerProcess()
-    {
-        Console.WriteLine("started to handle processes");
-        while (true)
-        {
-            try
-            {
-                if (DeafQueue.IsEmpty)
-                {
-                    continue;
-                }
-
-                var gotListener = DeafQueue.TryDequeue(out var port);
-                if (!gotListener)
-                {
-                    continue;
-                }
-
-                var thread = new Thread(Listen);
-                thread.Start(port);
-            }
-            catch
-            {
-                Console.WriteLine("Error while reviving listener");
-                throw;
-            }
+            new Thread(StartServer).Start(MainPort + i);
         }
     }
 
+    private static void StartServer(object? state)
+    {
+        if (state is not int cliPort) throw new Exception("Error while reading state from Server");
+        try
+        {
+            Console.WriteLine("[{0}] Server started", cliPort);
+            var mainListener = TcpListener.Create(cliPort);
+            mainListener.Start();
+            var mainCli = mainListener.AcceptTcpClient();
+            var stream = mainCli.GetStream();
+            while (true)
+            {
+                var opt = stream.ReadOpt();
+                var listener = TcpListener.Create(0);
+                listener.Start();
+                var port = ((IPEndPoint) listener.LocalEndpoint).Port;
+                switch (opt)
+                {
+                    case 1:
+                        new Thread(ReadThread).Start(listener);
+                        stream.Write(BitConverter.GetBytes(port));
+                        break;
+                    case 2:
+
+                        new Thread(WriteThread).Start(listener);
+                        stream.Write(BitConverter.GetBytes(port));
+                        break;
+                    default:
+                        throw new Exception("WHAT IS GOING ON????");
+                }
+            }
+        }
+        catch (Exception e) when (e is SocketException or InvalidOperationException)
+        {
+            Console.WriteLine(e.Message);
+            StartServer(cliPort);
+        }
+    }
+    
     private static void QueueHandlerThread()
     {
         while (true)
@@ -130,43 +129,69 @@ public class Program
          }
      }
 
-     private static void Listen(object? state)
+     private static void ReadThread(object? state)
      {
-         if (state is not int port) throw new ApplicationException("Invalid state while setting up TCP listener");
-         using var listener = TcpListener.Create(port);
-         listener.Start();
-         Console.WriteLine("[{0}] Process opened", listener.LocalEndpoint);
+         if (state is not TcpListener listener) throw new ApplicationException("Invalid state while setting up TCP listener");
+         Console.WriteLine("[{0}] Read process opened", listener.LocalEndpoint);
          using var client = listener.AcceptTcpClient();
          using var stream = client.GetStream();
-         while (true)
-         {
-             try
-             {
-                 var (parameters, description) = stream.ReadMessage();
-                 int[] result;
-                 switch (parameters[0])
-                 {
-                     case 0:
-                         _ = Clients.TryGetValue(parameters[1], out var clientData);
-                         result = [clientData!.Value, clientData.Limit];
-                         stream.Write(PacketBuilder.WriteMessage(ref result, clientData.Transactions));
-                         break;
-                     default:
-                         var id = Guid.NewGuid();
-                         TransactionQueue.Enqueue(new TransactionRequest(id, parameters, description ?? string.Empty));
-                         result = AwaitResponse(id);
-                         stream.Write(PacketBuilder.WriteMessage(ref result));
-                         break;
-                 }
-             }
-             catch (Exception e) when (e is SocketException or IOException or InvalidOperationException)
-             {
-                 DeafQueue.Enqueue(port);
-                 break;
-             }
-         }
+         var parameters = stream.ReadMessage();
+         _ = Clients.TryGetValue(parameters[1], out var clientData);
+         stream.Write(PacketBuilder.WriteMessage([clientData!.Value, clientData.Limit], clientData.Transactions));
+         listener.Stop();
+         listener.Dispose();
      }
-     
+
+     private static void WriteThread(object? state)
+     {
+         if (state is not TcpListener listener) throw new ApplicationException("Invalid state while setting up TCP listener");
+         Console.WriteLine("[{0}] Write process opened", listener.LocalEndpoint);
+         using var client = listener.AcceptTcpClient();
+         using var stream = client.GetStream();
+         var id = Guid.NewGuid();
+         var (parameters, description) = stream.ReadWriteMessage();
+         TransactionQueue.Enqueue(new TransactionRequest(id, parameters, description));
+         stream.Write(PacketBuilder.WriteMessage(AwaitResponse(id)));
+         listener.Stop();
+         listener.Dispose();
+     }
+
+     // private static void Listen(object? state)
+     // {
+     //     if (state is not int port) throw new ApplicationException("Invalid state while setting up TCP listener");
+     //     using var listener = TcpListener.Create(port);
+     //     listener.Start();
+     //     Console.WriteLine("[{0}] Process opened", listener.LocalEndpoint);
+     //     using var client = listener.AcceptTcpClient();
+     //     using var stream = client.GetStream();
+     //     while (true)
+     //     {
+     //         try
+     //         {
+     //             var (parameters, description) = stream.ReadWriteMessage();
+     //             int[] result;
+     //             switch (parameters[0])
+     //             {
+     //                 case 0:
+     //                     _ = Clients.TryGetValue(parameters[1], out var clientData);
+     //                     result = [clientData!.Value, clientData.Limit];
+     //                     // stream.Write(PacketBuilder.WriteMessage(ref result, clientData.Transactions));
+     //                     break;
+     //                 default:
+     //                     var id = Guid.NewGuid();
+     //                     TransactionQueue.Enqueue(new TransactionRequest(id, parameters, description ?? string.Empty));
+     //                     result = AwaitResponse(id);
+     //                     stream.Write(PacketBuilder.WriteMessage(ref result));
+     //                     break;
+     //             }
+     //         }
+     //         catch (Exception e) when (e is SocketException or IOException or InvalidOperationException)
+     //         {
+     //             DeafQueue.Enqueue(port);
+     //             break;
+     //         }
+     //     }
+     // }
      private static int[] AwaitResponse(Guid id)
      {
          var finished = false;

@@ -5,7 +5,7 @@ namespace Rinha2024.Dotnet.IO;
 public static class PacketBuilder
 {
     
-    public static byte[] WriteMessage(ref int[] message)
+    public static byte[] WriteMessage(int[] message)
     {
         using var ms = new MemoryStream();
         foreach (var item in message)
@@ -15,7 +15,7 @@ public static class PacketBuilder
         return ms.ToArray();
     }
     
-    public static byte[] WriteMessage(ref int[] message, LinkedList<Program.Transaction> transactions)
+    public static byte[] WriteMessage(int[] message, LinkedList<Program.Transaction> transactions)
     {
         using var ms = new MemoryStream();
         foreach (var item in message)

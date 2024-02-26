@@ -5,7 +5,7 @@ namespace Rinha2024.VirtualDb.IO;
 
 public static class PacketReader
 {
-    public static Program.SocketMessage ReadMessage(this NetworkStream stream)
+    public static int[] ReadMessage(this NetworkStream stream)
     {
         var receivedBuffer = new byte[28];
         var result = new int[2];
@@ -14,16 +14,31 @@ public static class PacketReader
         {
             result[i] = BitConverter.ToInt32(receivedBuffer, i * 4);
         }
-        string? description = null;
-        if (result[0] > 0)
+        return result;
+    }
+    public static (int[], string) ReadWriteMessage(this NetworkStream stream)
+    {
+        var receivedBuffer = new byte[28];
+        var result = new int[2];
+        _ = stream.Read(receivedBuffer);
+        for (var i = 0; i < 2; i++)
         {
-            var pos = 8;
-            for (int i = 0; i < 10; i++)
-            {
-                description += BitConverter.ToChar(receivedBuffer, pos);
-                pos+=2;
-            }
+            result[i] = BitConverter.ToInt32(receivedBuffer, i * 4);
         }
-        return new Program.SocketMessage(result, description);
+        var description = string.Empty;
+        var pos = 8;
+        for (var i = 0; i < 10; i++)
+        {
+            description += BitConverter.ToChar(receivedBuffer, pos);
+            pos += 2;
+        }
+        return (result, description);
+    }
+    
+    public static byte ReadOpt(this NetworkStream stream)
+    {
+        var receivedBuffer = new byte[1];
+        _ = stream.Read(receivedBuffer);
+        return receivedBuffer[0];
     }
 }
