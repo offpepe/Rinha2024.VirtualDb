@@ -2,7 +2,7 @@
 using System.Globalization;
 using System.Net;
 using System.Net.Sockets;
-using System.Reflection.Metadata;
+using System.Threading.Channels;
 using Rinha2024.VirtualDb.Extensions;
 using Rinha2024.VirtualDb.IO;
 using Guid = System.Guid;
@@ -11,31 +11,32 @@ namespace Rinha2024.VirtualDb;
 
 public class Program
 {
-    private static readonly int MainPort = int.TryParse(Environment.GetEnvironmentVariable("BASE_PORT"), out var basePort) ? basePort : 20000;
+    private static readonly int WritePipes = int.TryParse(Environment.GetEnvironmentVariable("WRITE_PIPES"), out var writePipes) ? writePipes : 2;
+    private static readonly int MainPort = int.TryParse(Environment.GetEnvironmentVariable("BASE_PORT"), out var basePort) ? basePort : 40000;
+    private static readonly int TotalEntryPoints = int.TryParse(Environment.GetEnvironmentVariable("TOTAL_ENTRY_POINTS"), out var basePort) ? basePort : 50;
     private static readonly ConcurrentQueue<TransactionRequest> TransactionQueue = new();
-    private static readonly ConcurrentDictionary<Guid, int[]> Results = new();
+    private static readonly ConcurrentDictionary<Guid, int[]> ResultPool = new();
     private static readonly ConcurrentDictionary<int, Client> Clients = new();
 
     public static void Main()
     {
         SetupClients();
-        var queueThread = new Thread(TransactionWorker)
+        for (var i = 0; i < WritePipes; i++)
         {
-            IsBackground = true
-        };
-        queueThread.Start();
-        for (var i = 0; i < 1000; i++)
+            new Thread(TransactionWorker).Start();
+        }
+        for (var i = 0; i < TotalEntryPoints; i++)
         {
-            new Thread(Listener).Start(MainPort + i);
+            new Thread(StartServer).Start(MainPort + i);
         }
     }
 
-    private static void Listener(object? state)
+    private static void StartServer(object? state)
     {
         if (state is not int cliPort) throw new Exception("Error while reading state from Server");
         try
         {
-            Console.WriteLine("[{0}] Server started", cliPort);
+            // Console.WriteLine("[{0}] Server started", cliPort);
             var mainListener = TcpListener.Create(cliPort);
             mainListener.Server.NoDelay = true;
             mainListener.Server.Ttl = 255;
@@ -56,7 +57,7 @@ public class Program
                     mainListener.Server.Ttl = 255;
                     mainListener.ExclusiveAddressUse = true;
                     mainListener.Start();
-                    Console.WriteLine("\n[M::{0}]-REVIVED", cliPort);
+                    // Console.WriteLine("\n[M::{0}]-REVIVED", cliPort);
                     mainCli = mainListener.AcceptTcpClient();
                     stream = mainCli.GetStream();
                     needsAcceptance = false;
@@ -68,7 +69,7 @@ public class Program
                 }
                 catch (Exception e)
                 {
-                    Console.WriteLine(e);
+                    // Console.WriteLine(e.GetType());
                     if (!mainCli.Connected)
                     {
                         needsAcceptance = true;
@@ -98,7 +99,7 @@ public class Program
         catch (Exception e) when (e is SocketException or InvalidOperationException)
         {
             Console.WriteLine(e.Message);
-            Listener(cliPort);
+            StartServer(cliPort);
         }
     }
     
@@ -107,9 +108,9 @@ public class Program
      private static void ReadWorker(object? state)
      {
          if (state is not TcpListener listener) throw new ApplicationException("Invalid state while setting up TCP listener");
-         Console.Write("--[R{0}]", listener.LocalEndpoint);
+         // Console.Write("--[R{0}]", listener.LocalEndpoint);
+         listener.Server.ReceiveTimeout = 10000;
          using var client = listener.AcceptTcpClient();
-         client.ReceiveTimeout = 10000;
          var stream = client.GetStream();
          var parameters = stream.ReadMessage();
          _ = Clients.TryGetValue(parameters[1], out var clientData);
@@ -120,14 +121,15 @@ public class Program
      private static void WriteWorker(object? state)
      {
          if (state is not TcpListener listener) throw new ApplicationException("Invalid state while setting up TCP listener");
-         Console.Write("--[W{0}]", listener.LocalEndpoint);
+         // Console.Write("--[W{0}]", listener.LocalEndpoint);
+         listener.Server.ReceiveTimeout = 10000;
          using var client = listener.AcceptTcpClient();
-         client.ReceiveTimeout = 10000;
          using var stream = client.GetStream();
          var id = Guid.NewGuid();
          var (parameters, description) = stream.ReadWriteMessage();
-         TransactionQueue.Enqueue(new TransactionRequest(id, parameters, description));
-         stream.Write(PacketBuilder.WriteMessage(id.AwaitResponse(Results)));
+         var transaction = new TransactionRequest(id, parameters, description);
+         TransactionQueue.Enqueue(transaction);
+         stream.Write(PacketBuilder.WriteMessage(transaction.AwaitResponse()));
          listener.Stop();
      }
      
@@ -135,6 +137,7 @@ public class Program
      {
          while (true)
          {
+             if (TransactionQueue.IsEmpty) continue;
              if (!TransactionQueue.TryDequeue(out var req))
              {
                  continue;
@@ -142,7 +145,7 @@ public class Program
              var found = Clients.TryGetValue(req.Parameters[0], out var client);
              if (!found)
              {
-                 Results.TryWriteResult(req.Id, [0,0]);
+                 req.Response = [0, 0];
                  return;
              }
              var value = req.Parameters[1];
@@ -150,14 +153,14 @@ public class Program
              var isDebit = req.Parameters[1] < 0; 
              if (isDebit && -newBalance > client.Limit)
              {
-                 Results.TryWriteResult(req.Id, [0,-1]);
+                 req.Response = [0, -1];
                  return;
              }
              var transaction = new Transaction(isDebit ? -value : value, isDebit ? 'd' : 'c', req.Description,
                  DateTime.Now.ToString(CultureInfo.InvariantCulture));
              client.SetValue(newBalance);
              client.AddTransaction(transaction);
-             Results.TryWriteResult(req.Id, [newBalance, client.Limit]);
+             req.Response = [newBalance, client.Limit];
          }
      }
 

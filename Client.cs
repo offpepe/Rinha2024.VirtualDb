@@ -37,5 +37,23 @@ public class Client
 
 public readonly record struct Transaction(int Value, char Type, string Description, string CreatedAt);
 
-public readonly record struct TransactionRequest(Guid Id, int[] Parameters, string Description);
+public class TransactionRequest 
+{
+    public TransactionRequest(Guid id, int[] parameters, string description)
+    {
+        Id = id;
+        Parameters = parameters;
+        Description = description;
+    }
+    public Guid Id { get; init; }
+    public int[] Parameters { get; init; }
+    public string Description { get; init; }
+    public int[]? Response { get; set; }
+
+    public int[] AwaitResponse()
+    {
+        while (Response == null) { /* ignore */ }   
+        return Response;
+    }
+};
 

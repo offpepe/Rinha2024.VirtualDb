@@ -4,8 +4,8 @@
         <TargetFramework>net8.0</TargetFramework>
         <Nullable>enable</Nullable>
         <ImplicitUsings>enable</ImplicitUsings>
-<!--        <PublishAot>true</PublishAot>-->
-<!--        <IsAotCompatible>true</IsAotCompatible>-->
+        <PublishAot>true</PublishAot>
+        <IsAotCompatible>true</IsAotCompatible>
         <DockerDefaultTargetOS>Linux</DockerDefaultTargetOS>
         <OptimizationPreference>Speed</OptimizationPreference>
         <EnableTrimAnalyzer>false</EnableTrimAnalyzer>
