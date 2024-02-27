@@ -1,180 +1,189 @@
 ﻿using System.Collections.Concurrent;
+using System.Globalization;
 using System.Net;
 using System.Net.Sockets;
-using Rinha2024.Dotnet.IO;
+using System.Threading.Channels;
+using Rinha2024.VirtualDb.Extensions;
+using Rinha2024.VirtualDb.IO;
+using Guid = System.Guid;
 
 namespace Rinha2024.VirtualDb;
 
 public class Program
 {
-    private static readonly int Range =
-        int.TryParse(Environment.GetEnvironmentVariable("CONNECTION_RANGE"), out var connectionRange)
-            ? connectionRange
-            : 1;
-
-    private static readonly int InitialPort =
-        int.TryParse(Environment.GetEnvironmentVariable("BASE_PORT"), out var basePort) ? basePort : 7000;
-
-    private static readonly TimeSpan DefaultWait = TimeSpan.FromTicks(10);
-    private static readonly ConcurrentQueue<Request> Queue = new();
-    private static readonly ConcurrentDictionary<Guid, int[]> Results = new();
-    private static readonly ConcurrentQueue<int> ClosedPortsStack = new();
-    private static readonly VirtualDatabase Vdb = new();
-
+    private static readonly int WritePipes = int.TryParse(Environment.GetEnvironmentVariable("WRITE_PIPES"), out var writePipes) ? writePipes : 2;
+    private static readonly int MainPort = int.TryParse(Environment.GetEnvironmentVariable("BASE_PORT"), out var basePort) ? basePort : 40000;
+    private static readonly int TotalEntryPoints = int.TryParse(Environment.GetEnvironmentVariable("TOTAL_ENTRY_POINTS"), out var basePort) ? basePort : 50;
+    private static readonly ConcurrentQueue<TransactionRequest> TransactionQueue = new();
+    private static readonly ConcurrentDictionary<Guid, int[]> ResultPool = new();
+    private static readonly ConcurrentDictionary<int, Client> Clients = new();
 
     public static void Main()
     {
-        var queueThread = new Thread(QueueHandlerThread);
-        queueThread.Start();
-        var deadPortsStack = new Thread(ListenerHandlerProcess);
-        deadPortsStack.Start();
-        for (var i = 0; i < Range; i++)
+        SetupClients();
+        for (var i = 0; i < WritePipes; i++)
         {
-            ClosedPortsStack.Enqueue(InitialPort + i);
+            new Thread(TransactionWorker).Start();
         }
-        Console.WriteLine("Server started");
-    }
-
-    private static void ListenerHandlerProcess()
-    {
-        Console.WriteLine("started to handle processes");
-        while (true)
+        for (var i = 0; i < TotalEntryPoints; i++)
         {
-            if (ClosedPortsStack.IsEmpty)
-            {
-                continue;
-            }
-
-            var gotListener = ClosedPortsStack.TryDequeue(out var port);
-            if (!gotListener)
-            {
-                continue;
-            }
-
-            var thread = new Thread(TryGetRequest);
-            thread.Start(port);
+            new Thread(StartServer).Start(MainPort + i);
         }
     }
 
-    private static void QueueHandlerThread()
+    private static void StartServer(object? state)
     {
-        
-        while (true)
-        {
-            if (!Queue.TryDequeue(out var req))
-            {
-                continue;
-            }
-
-            if (req.Read)
-            {
-                var idx = req.ReadIndex();
-                var client = Vdb.GetClient(ref idx);
-                TryWriteResult(req.OperationId, client);
-                continue;
-            }
-
-            var parameters = req.ReadTransactionParams();
-            if (parameters == null)
-            {
-                TryWriteResult(req.OperationId, [0, 0]);
-                continue;
-            }
-
-            TryWriteResult(req.OperationId, Vdb.DoTransaction(ref parameters[0], ref parameters[1]));
-        }
-    }
-
-
-    private static void TryGetRequest(object? obj)
-    {
-        if (obj is not int port) throw new ApplicationException("Error while opening TCP listener");
+        if (state is not int cliPort) throw new Exception("Error while reading state from Server");
         try
         {
-            using var listener = new TcpListener(IPAddress.Any, port);
-            listener.ExclusiveAddressUse = true;
-            listener.Server.NoDelay = true;
-            listener.Start();
-#if !ON_CLUSTER
-            Console.WriteLine("process {0} is available", listener.LocalEndpoint);
-#endif
-            using var client = listener.AcceptTcpClient();
-#if !ON_CLUSTER
-            Console.WriteLine("process {0} got request", listener.LocalEndpoint);
-#endif
-            using var stream = client.GetStream();
-            var parameters = stream.ReadMessage();
-            var id = Guid.NewGuid();
-            int[] result;
-            if (parameters[0] == 0)
+            // Console.WriteLine("[{0}] Server started", cliPort);
+            var mainListener = TcpListener.Create(cliPort);
+            mainListener.Server.NoDelay = true;
+            mainListener.Server.Ttl = 255;
+            mainListener.ExclusiveAddressUse = true;
+            mainListener.Start();
+            var mainCli = mainListener.AcceptTcpClient();
+            var stream = mainCli.GetStream();
+            var needsAcceptance = false;
+            while (true)    
             {
+                if (needsAcceptance)
+                {
+                    stream.Close();
+                    mainCli.Close();
+                    mainListener.Stop();
+                    mainListener = TcpListener.Create(cliPort);
+                    mainListener.Server.NoDelay = true;
+                    mainListener.Server.Ttl = 255;
+                    mainListener.ExclusiveAddressUse = true;
+                    mainListener.Start();
+                    // Console.WriteLine("\n[M::{0}]-REVIVED", cliPort);
+                    mainCli = mainListener.AcceptTcpClient();
+                    stream = mainCli.GetStream();
+                    needsAcceptance = false;
+                }
+                byte opt = 0;
+                try
+                {
+                    opt = stream.ReadOpt();
+                }
+                catch (Exception e)
+                {
+                    // Console.WriteLine(e.GetType());
+                    if (!mainCli.Connected)
+                    {
+                        needsAcceptance = true;
+                        continue;
+                    }
+                }
+                TcpListener listener;
+                listener = TcpListener.Create(0);
+                listener.Start();
+                var port = ((IPEndPoint) listener.LocalEndpoint).Port;
+                switch (opt)
+                {
+                    case 1:
+                        new Thread(ReadWorker).Start(listener);
+                        stream.Write(BitConverter.GetBytes(port));
+                        break;
+                    case 2:
 
-                result = Vdb.GetClient(ref parameters[1]);
-                SendData(result, stream);
-#if !ON_CLUSTER
-                Console.WriteLine("READ REQUEST SUCCESS | ID: {0} - RESULT: {1} - TUNNEL: {2} ", id,string.Join(',', result), listener.LocalEndpoint);
-#endif
-                listener.Stop();
-                ClosedPortsStack.Enqueue(port);
-                return;
+                        new Thread(WriteWorker).Start(listener);
+                        stream.Write(BitConverter.GetBytes(port));
+                        break;
+                    default:
+                        throw new Exception("WHAT IS GOING ON????");
+                }
             }
-
-            Queue.Enqueue(new Request()
-            {
-                Read = false,
-                Parameter = parameters,
-                OperationId = id
-            });
-            result = AwaitResponse(id);
-            SendData(result, stream);
-#if !ON_CLUSTER
-            Console.WriteLine("WRITE REQUEST SUCCESS | ID: {0} - RESULT: {1} - TUNNEL: {2} ", id,string.Join(',', result), listener.LocalEndpoint);
-#endif
-            ClosedPortsStack.Enqueue(port);
-            listener.Stop();
         }
-        catch (IOException _)
+        catch (Exception e) when (e is SocketException or InvalidOperationException)
         {
-            ClosedPortsStack.Enqueue(port);
+            Console.WriteLine(e.Message);
+            StartServer(cliPort);
         }
     }
+    
+     #region Workers
 
-    private static int[] AwaitResponse(Guid id)
-    {
-        var finished = false;
-        int[]? result = null;
-        while (!finished)
-        {
-            finished = Results.Remove(id, out result);
-            Thread.Sleep(TimeSpan.FromTicks(10));
-            if (result != null) break;
-        }
+     private static void ReadWorker(object? state)
+     {
+         if (state is not TcpListener listener) throw new ApplicationException("Invalid state while setting up TCP listener");
+         // Console.Write("--[R{0}]", listener.LocalEndpoint);
+         listener.Server.ReceiveTimeout = 10000;
+         using var client = listener.AcceptTcpClient();
+         var stream = client.GetStream();
+         var parameters = stream.ReadMessage();
+         _ = Clients.TryGetValue(parameters[1], out var clientData);
+         stream.Write(PacketBuilder.WriteMessage([clientData!.Value, clientData.Limit], clientData.Transactions, clientData.FilledLenght));
+         listener.Stop();
+     }
 
-        return result!;
-    }
+     private static void WriteWorker(object? state)
+     {
+         if (state is not TcpListener listener) throw new ApplicationException("Invalid state while setting up TCP listener");
+         // Console.Write("--[W{0}]", listener.LocalEndpoint);
+         listener.Server.ReceiveTimeout = 10000;
+         using var client = listener.AcceptTcpClient();
+         using var stream = client.GetStream();
+         var id = Guid.NewGuid();
+         var (parameters, description) = stream.ReadWriteMessage();
+         var transaction = new TransactionRequest(id, parameters, description);
+         TransactionQueue.Enqueue(transaction);
+         stream.Write(PacketBuilder.WriteMessage(transaction.AwaitResponse()));
+         listener.Stop();
+     }
+     
+     private static void TransactionWorker()
+     {
+         while (true)
+         {
+             if (TransactionQueue.IsEmpty) continue;
+             if (!TransactionQueue.TryDequeue(out var req))
+             {
+                 continue;
+             }
+             var found = Clients.TryGetValue(req.Parameters[0], out var client);
+             if (!found)
+             {
+                 req.Response = [0, 0];
+                 return;
+             }
+             var value = req.Parameters[1];
+             var newBalance = client!.Value + value;
+             var isDebit = req.Parameters[1] < 0; 
+             if (isDebit && -newBalance > client.Limit)
+             {
+                 req.Response = [0, -1];
+                 return;
+             }
+             var transaction = new Transaction(isDebit ? -value : value, isDebit ? 'd' : 'c', req.Description,
+                 DateTime.Now.ToString(CultureInfo.InvariantCulture));
+             client.SetValue(newBalance);
+             client.AddTransaction(transaction);
+             req.Response = [newBalance, client.Limit];
+         }
+     }
 
-    private static void TryWriteResult(Guid id, int[] data)
-    {
-        var gotResult = false;
-        while (!gotResult)
-        {
-            try
-            {
-                gotResult = Results.TryAdd(id, data);
-                break;
-            }
-            catch (OverflowException _)
-            {
-                //ignore
-            }
+     #endregion
+     
+     private static void SetupClients()
+     {
+         int[][] clients = [
+             [0, 0],
+             [0, 100000],
+             [0, 80000],
+             [0, 1000000],
+             [0, 10000000],
+             [0, 500000],
+         ]; 
+         for (var i = 0; i < 6; i++)
+         {
+             Clients.TryAdd(i, new Client(clients[i][0], clients[i][1]));
+         }
+     }
 
-            Thread.Sleep(TimeSpan.FromTicks(10));
-        }
-    }
+    
 
-    private static void SendData(int[] data, NetworkStream stream)
-    {
-        var buffer = PacketBuilder.WriteMessage(ref data);
-        stream.Write(buffer);
-    }
+     
+
 }
