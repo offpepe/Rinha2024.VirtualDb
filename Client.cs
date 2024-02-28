@@ -39,9 +39,8 @@ public readonly record struct Transaction(int Value, char Type, string Descripti
 
 public class TransactionRequest 
 {
-    public TransactionRequest(Guid id, int[] parameters, string description)
+    public TransactionRequest(int[] parameters, string description)
     {
-        Id = id;
         Parameters = parameters;
         Description = description;
     }
