@@ -14,7 +14,7 @@ public static class PacketReader
         result[1] = BitConverter.ToInt32(receivedBuffer, 4);
         return result;
     }
-    public static (int[], string?) ReadWriteMessage(this NetworkStream stream)
+    public static (int[], string) ReadWriteMessage(this NetworkStream stream)
     {
         var receivedBuffer = new byte[28];
         var result = new int[2];
@@ -23,7 +23,6 @@ public static class PacketReader
         {
             result[i] = BitConverter.ToInt32(receivedBuffer, i * 4);
         }
-        if (result[0] == 0) return (result, null);
         var description = string.Empty;
         var pos = 8;
         for (var i = 0; i < 10; i++)

@@ -1,4 +1,7 @@
-﻿namespace Rinha2024.VirtualDb;
+﻿using System.Net.Sockets;
+using Rinha2024.VirtualDb.IO;
+
+namespace Rinha2024.VirtualDb;
 
 public class Client
 {
@@ -39,20 +42,18 @@ public readonly record struct Transaction(int Value, char Type, string Descripti
 
 public class TransactionRequest 
 {
-    public TransactionRequest(int[] parameters, string description)
+    public TransactionRequest(int[] parameters, string description, NetworkStream stream)
     {
         Parameters = parameters;
         Description = description;
+        _stream = stream;
     }
     public Guid Id { get; init; }
     public int[] Parameters { get; init; }
     public string Description { get; init; }
-    public int[]? Response { get; set; }
 
-    public int[] AwaitResponse()
-    {
-        while (Response == null) { /* ignore */ }   
-        return Response;
-    }
+    private readonly Stream _stream;
+
+    public void SendResponse(int[] response) => _stream.Write(PacketBuilder.WriteMessage(response));
 };
 
