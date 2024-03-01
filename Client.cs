@@ -1,4 +1,5 @@
-﻿using System.Net.Sockets;
+﻿using System.Diagnostics;
+using System.Net.Sockets;
 using Rinha2024.VirtualDb.IO;
 
 namespace Rinha2024.VirtualDb;
@@ -12,9 +13,9 @@ public class Client
     }
 
     public int Value { get; set; }
-    public int Limit { get; set; }
+    public int Limit { get; init; }
+    public int FilledLenght;
     public Transaction[] Transactions { get; set; } = new Transaction[10];
-    public int FilledLenght = 0;
     public void SetValue(int newBalance) => this.Value = newBalance;
 
     public void AddTransaction(Transaction transaction)
@@ -31,29 +32,15 @@ public class Client
         Transactions[0] = transaction;
         if (FilledLenght < 10) FilledLenght++;
     }
-
-    public IEnumerable<Transaction> GetTransactions(int count)
-    {
-        for (var i = 0; i < count; i++) yield return Transactions.ElementAt(i);
-    }
 };
 
 public readonly record struct Transaction(int Value, char Type, string Description, string CreatedAt);
 
-public class TransactionRequest 
+public class TransactionRequest(int[] parameters, string description, NetworkStream stream)
 {
-    public TransactionRequest(int[] parameters, string description, NetworkStream stream)
-    {
-        Parameters = parameters;
-        Description = description;
-        _stream = stream;
-    }
-    public Guid Id { get; init; }
-    public int[] Parameters { get; init; }
-    public string Description { get; init; }
-
-    private readonly Stream _stream;
-
+    public int[] Parameters { get; } = parameters;
+    public string Description { get; } = description;
+    private readonly Stream _stream = stream;
     public void SendResponse(int[] response) => _stream.Write(PacketBuilder.WriteMessage(response));
 };
 
