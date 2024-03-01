@@ -1,5 +1,4 @@
-﻿using System.Diagnostics;
-using System.Net.Sockets;
+﻿using System.Net.Sockets;
 using Rinha2024.VirtualDb.IO;
 
 namespace Rinha2024.VirtualDb;
@@ -12,12 +11,36 @@ public class Client
         Limit = limit;
     }
 
-    public int Value { get; set; }
+    public int Value { get; private set; }
     public int Limit { get; init; }
+    
     public int FilledLenght;
     public Transaction[] Transactions { get; set; } = new Transaction[10];
-    public void SetValue(int newBalance) => this.Value = newBalance;
 
+    private SpinLock _lock = new SpinLock();
+    
+    public int[] DoTransaction(int value, string description)
+    {
+        try
+        {
+            var locked = false;
+            _lock.Enter(ref locked);
+            var newBalance = Value + value;
+            var isDebit = value < 0;
+            if (isDebit && -newBalance > Limit)
+            {
+                return [0, -1];
+            }
+            Value = newBalance;
+            AddTransaction(new Transaction(isDebit ? -value : value, isDebit ? 'd' : 'c', description, DateTime.Now));
+            return [newBalance, Limit];
+        }
+        finally
+        {
+            _lock.Exit();
+        }
+    }
+    public void SetValue(int newBalance) => Value = newBalance;
     public void AddTransaction(Transaction transaction)
     {
         Transactions[9] = Transactions[8];
@@ -34,13 +57,12 @@ public class Client
     }
 };
 
-public readonly record struct Transaction(int Value, char Type, string Description, string CreatedAt);
+public readonly record struct Transaction(int Value, char Type, string Description, DateTime CreatedAt);
 
 public class TransactionRequest(int[] parameters, string description, NetworkStream stream)
 {
     public int[] Parameters { get; } = parameters;
     public string Description { get; } = description;
-    private readonly Stream _stream = stream;
-    public void SendResponse(int[] response) => _stream.Write(PacketBuilder.WriteMessage(response));
+    public void SendResponse(int[] response) => stream.Write(PacketBuilder.WriteMessage(response));
 };
 

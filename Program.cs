@@ -1,4 +1,4 @@
-﻿using System.Collections.Concurrent;
+using System.Collections.Concurrent;
 using System.Globalization;
 using System.Net.Sockets;
 using Rinha2024.VirtualDb.Extensions;
@@ -9,8 +9,8 @@ namespace Rinha2024.VirtualDb;
 public class Program
 {
     private static readonly int WritePipes = int.TryParse(Environment.GetEnvironmentVariable("WRITE_PIPES"), out var writePipes) ? writePipes : 1;
-    private static readonly int WPort = int.TryParse(Environment.GetEnvironmentVariable("W_BASE_PORT"), out var basePort) ? basePort : 40000;
-    private static readonly int RPort = int.TryParse(Environment.GetEnvironmentVariable("R_BASE_PORT"), out var basePort) ? basePort : 20000;
+    private static readonly int WPort = int.TryParse(Environment.GetEnvironmentVariable("W_BASE_PORT"), out var basePort) ? basePort : 10000;
+    private static readonly int RPort = int.TryParse(Environment.GetEnvironmentVariable("R_BASE_PORT"), out var basePort) ? basePort : 15000;
     private static readonly int ListenerNum = int.TryParse(Environment.GetEnvironmentVariable("LISTENERS"), out var listeners) ? listeners : 20;
     private static readonly ConcurrentQueue<TransactionRequest> TransactionQueue = new();
     private static readonly ConcurrentDictionary<int, Client> Clients = new();
@@ -19,7 +19,7 @@ public class Program
     public static void Main()
     {
         SetupClients();
-        for (var i = 0; i < WritePipes; i++) new Thread(TransactionWorker).Start();
+        // for (var i = 0; i < WritePipes; i++) new Thread(TransactionWorker).Start();
         for (var i = 0; i < ListenerNum; i++)
         {
             new Thread(ReadChannel).Start(RPort + i);
@@ -54,12 +54,20 @@ public class Program
         while (true)
         {
             var mainCli = mainListener.AcceptTcpClient();
-            var stream = mainCli.GetStream();
-            var (parameters, description) = stream.ReadWriteMessage();
-            var transaction = new TransactionRequest(parameters, description, stream);
-            TransactionQueue.Enqueue(transaction);
+            new Thread(DoTransaction).Start(mainCli);
         }
     }
+
+    private static void DoTransaction(object? state)
+    {
+        if (state is not TcpClient client) throw new Exception("Error while reading state from Server");
+        var stream = client.GetStream();
+        var (parameters, description) = stream.ReadWriteMessage();
+        _ = Clients.TryGetValue(parameters[0], out var clientData);
+        var result = clientData!.DoTransaction(parameters[1], description);
+        stream.Write(PacketBuilder.WriteMessage(result));
+    }
+    
     
     
      #region Workers
@@ -69,7 +77,6 @@ public class Program
          {
              if (TransactionQueue.IsEmpty || !TransactionQueue.TryDequeue(out var req))
              {
-                 Thread.Sleep(1);
                  continue;
              }
              _ = Clients.TryGetValue(req.Parameters[0], out var client);
@@ -81,8 +88,7 @@ public class Program
                  req.SendResponse([0, -1]);
                  continue;
              }
-             var transaction = new Transaction(isDebit ? -value : value, isDebit ? 'd' : 'c', req.Description,
-                 DateTime.Now.ToString(CultureInfo.InvariantCulture));
+             var transaction = new Transaction(isDebit ? -value : value, isDebit ? 'd' : 'c', req.Description, DateTime.Now);
              client.SetValue(newBalance);
              client.AddTransaction(transaction);
              req.SendResponse([newBalance, client.Limit]);
