@@ -1,7 +1,6 @@
 ﻿using System.Collections.Concurrent;
-using System.Net.Http.Headers;
 using System.Net.Sockets;
-using Rinha2024.VirtualDb.IO;
+using Rinha2024.VirtualDb.Extensions;
 
 namespace Rinha2024.VirtualDb;
 
@@ -19,8 +18,9 @@ public class Client
     public int Limit { get; set; }
     
     public int FilledLenght;
-    public Transaction[] Transactions { get; set; } = new Transaction[10];
-    private readonly ConcurrentQueue<Transaction> _persistencyQueue = new();
+    public Transaction[] Transactions { get; } = new Transaction[10];
+    private readonly ConcurrentQueue<Transaction> _transactionIOQueue = new();
+    private FileStream? _fileStream;
 
     private SpinLock _lock;
     
@@ -28,55 +28,53 @@ public class Client
     {
         var locked = false;
         _lock.Enter(ref locked);
-        if (!locked) return (0, -1);
-        var newBalance = Value + value;
-        var isDebit = value < 0;
-        if (isDebit && -newBalance > Limit)
+        try
         {
-            return (0, -1);
+            if (!locked) return (0, -1);
+            var newBalance = Value + value;
+            var isDebit = value < 0;
+            if (isDebit && -newBalance > Limit)
+            {
+                return (0, -1);
+            }
+            Value = newBalance;
+            PersistClientData();
+            AddTransaction(new Transaction(Math.Abs(value), isDebit ? 'd' : 'c', description, DateTime.Now));
+            return (newBalance, Limit);
         }
-        Value = newBalance;
-        PersistClientData();
-        AddTransaction(new Transaction(Math.Abs(value), isDebit ? 'd' : 'c', description, DateTime.Now));
-        if (locked) _lock.Exit();
-        return (newBalance, Limit);
+        finally
+        {
+            _lock.Exit();
+        }
     }
-    public void SetValue(int newBalance) => Value = newBalance;
+    
 
     private void AddTransaction(Transaction transaction)
     {
-        Transactions[9] = Transactions[8];
-        Transactions[8] = Transactions[7];
-        Transactions[7] = Transactions[6];
-        Transactions[6] = Transactions[5];
-        Transactions[5] = Transactions[4];
-        Transactions[4] = Transactions[3];
-        Transactions[3] = Transactions[2];
-        Transactions[2] = Transactions[1];
-        Transactions[1] = Transactions[0];
-        Transactions[0] = transaction;
+       Transactions.AppendTransaction(transaction);
         if (FilledLenght < 10) FilledLenght++;
-        _persistencyQueue.Enqueue(transaction);
+        _transactionIOQueue.Enqueue(transaction);
     }
+    
 
     private void PersistClientData()
     {
-        using var fileStream  = File.OpenWrite($"./data/{Id}.capv");
-        fileStream.Position = 4;
+        _fileStream ??= File.OpenWrite($"./data/{Id}.capv");
+        _fileStream.Position = 4;
         var writeBuffer = new byte[4];
         var newValue = BitConverter.GetBytes(Value);
         writeBuffer[0] = newValue[0];
         writeBuffer[1] = newValue[1];
         writeBuffer[2] = newValue[2];
         writeBuffer[3] = newValue[3];
-        fileStream.Write(writeBuffer);
+        _fileStream.Write(writeBuffer);
     }
     
     private void PersistTransactionData()
     {
         while (true)
         {
-            if (_persistencyQueue.IsEmpty || !_persistencyQueue.TryDequeue(out var transaction))
+            if (_transactionIOQueue.IsEmpty || !_transactionIOQueue.TryDequeue(out var transaction))
             {
                 Thread.Sleep(TimeSpan.FromSeconds(1));
                 continue;
@@ -92,12 +90,13 @@ public class Client
             var typeBytes = BitConverter.GetBytes(transaction.Type);
             buffer[4] = typeBytes[0];
             buffer[5] = typeBytes[1];
-            var sizeBytes = BitConverter.GetBytes(transaction.Description.Length);
+            var sizedesc = transaction.Description.Length;
+            var sizeBytes = BitConverter.GetBytes(sizedesc);
             buffer[6] = sizeBytes[0];
             buffer[7] = sizeBytes[1];
             buffer[8] = sizeBytes[2];
             buffer[9] = sizeBytes[3];
-            var pos = 9;
+            var pos = 10;
             foreach (var c in transaction.Description)
             {
                 var descriptionBytes = BitConverter.GetBytes(c);

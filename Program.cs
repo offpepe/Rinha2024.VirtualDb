@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using System.Globalization;
 using System.Net.Sockets;
+using System.Text;
 using Rinha2024.VirtualDb.Extensions;
 using Rinha2024.VirtualDb.IO;
 
@@ -11,7 +12,7 @@ public class Program
     private static readonly int WritePipes = int.TryParse(Environment.GetEnvironmentVariable("WRITE_PIPES"), out var writePipes) ? writePipes : 1;
     private static readonly int WPort = int.TryParse(Environment.GetEnvironmentVariable("W_BASE_PORT"), out var basePort) ? basePort : 10000;
     private static readonly int RPort = int.TryParse(Environment.GetEnvironmentVariable("R_BASE_PORT"), out var basePort) ? basePort : 15000;
-    private static readonly int ListenerNum = int.TryParse(Environment.GetEnvironmentVariable("LISTENERS"), out var listeners) ? listeners : 1;
+    private static readonly int ListenerNum = int.TryParse(Environment.GetEnvironmentVariable("LISTENERS"), out var listeners) ? listeners : 20;
     private static readonly ConcurrentQueue<TransactionRequest> TransactionQueue = new();
     private static readonly ConcurrentDictionary<int, Client> Clients = new();
     private static readonly ConcurrentDictionary<Guid, PersistClientInfo> ClientPersistency = new();
@@ -21,8 +22,6 @@ public class Program
     public static void Main()
     {
         SetupClients();
-        // for (var i = 0; i < WritePipes; i++) new Thread(TransactionWorker).Start();
-        // new Thread(PersistClientData).Start();
         for (var i = 0; i < ListenerNum; i++)
         {
             new Thread(ReadChannel).Start(RPort + i);
@@ -101,6 +100,7 @@ public class Program
 
     private static void VerifyClientData(string path, Client client, int id)
     {
+        var transactionFilePath = $"./data/{id}-transactions.capv";
         using var file = File.OpenRead(path);
         if (file.Length != 8)
         {
@@ -111,32 +111,35 @@ public class Program
         _ = file.Read(buffer);
         client.Limit = BitConverter.ToInt32(buffer, 0);
         client.Value = BitConverter.ToInt32(buffer, 4);
-    }
-
-    private static void PersistClientData()
-    {
-        foreach (var client in ClientPersistency)
+        if (!File.Exists(transactionFilePath)) return;
+        using var transactionsFileStream = File.OpenRead(transactionFilePath);
+        if (transactionsFileStream.Length == 0) return; 
+        var transactionBuffer = new byte[transactionsFileStream.Length];
+        _ = transactionsFileStream.Read(transactionBuffer);
+        var position = 0;
+        for (var i = 0; i < 10; i++)
         {
-            var (uuid, data) = client;
-            if (!data.Changed) continue;
-            using var clientFile = File.OpenWrite($"./data/{uuid}.capv");
-            var writeBuffer = new byte[4];
-            var position = 4;
-            var newValue = BitConverter.GetBytes(data.Value);
-            writeBuffer[position] = newValue[0];
-            position++;
-            writeBuffer[position] = newValue[1];
-            position++;
-            writeBuffer[position] = newValue[2];
-            position++;
-            writeBuffer[position] = newValue[3];
-            clientFile.Write(writeBuffer, 4, 4);
+            var value = BitConverter.ToInt32(transactionBuffer, position);
+            position += 4;
+            var type = BitConverter.ToChar(transactionBuffer, position);
+            position += 2;
+            var size = BitConverter.ToInt32(transactionBuffer, position);
+            position += 4;
+            var description = new StringBuilder(size);
+            for (var j = 0; j < size; j++)
+            {
+                description.Append(BitConverter.ToChar(transactionBuffer, position));
+                position += 2;
+            }
+            var createdAt = BitConverter.ToInt64(transactionBuffer, position);
+            position += 8;
+            client.Transactions.AppendTransaction(new Transaction(value, type, description.ToString(), DateTime.FromBinary(createdAt)));
+            client.FilledLenght++;
+            if (position == transactionsFileStream.Length) break;
         }
-        Thread.Sleep(TimeSpan.FromSeconds(3));
+        
     }
-
-   
-     
+    
      private static void SetupClients()
      {
          int[][] clients = [
