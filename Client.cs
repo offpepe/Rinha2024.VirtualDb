@@ -1,9 +1,12 @@
 ﻿using System.Collections.Concurrent;
+using System.Diagnostics.CodeAnalysis;
 using System.Net.Sockets;
+using System.Text;
 using Rinha2024.VirtualDb.Extensions;
 
 namespace Rinha2024.VirtualDb;
 
+[SuppressMessage("ReSharper", "FunctionNeverReturns")]
 public class Client
 {
     public Client(int value, int limit, int id)
@@ -11,7 +14,19 @@ public class Client
         Value = value;
         Limit = limit;
         Id = id;
-        new Thread(PersistTransactionData).Start();
+        var storageFolder = Environment.GetEnvironmentVariable("storage_folder") ?? "./data";
+        _storagePath = $"{storageFolder}/{id}.capv";
+        _transactionStoragePath = $"{storageFolder}/{id}-transactions.capv";
+        if (File.Exists(_storagePath))
+        {
+            GetDiskStorageData();
+        }
+        else
+        {
+            CreateDiskStorageData();
+        }
+        new Thread(CreateTransactionRoutine).Start();
+        new Thread(UpdateRoutine).Start();
     }
     public int Id { get; init; }
     public int Value { get; set; }
@@ -19,9 +34,11 @@ public class Client
     
     public int FilledLenght;
     public Transaction[] Transactions { get; } = new Transaction[10];
-    private readonly ConcurrentQueue<Transaction> _transactionIOQueue = new();
-    private FileStream? _fileStream;
+    private readonly ConcurrentQueue<Transaction> _transactionIoQueue = new();
+    private readonly ConcurrentQueue<int> _clientIoQueue = new();
 
+    private readonly string _storagePath;
+    private readonly string _transactionStoragePath;
     private SpinLock _lock;
     
     public (int, int) DoTransaction(int value, string description)
@@ -38,7 +55,7 @@ public class Client
                 return (0, -1);
             }
             Value = newBalance;
-            PersistClientData();
+            _clientIoQueue.Enqueue(newBalance);
             AddTransaction(new Transaction(Math.Abs(value), isDebit ? 'd' : 'c', description, DateTime.Now));
             return (newBalance, Limit);
         }
@@ -53,34 +70,49 @@ public class Client
     {
        Transactions.AppendTransaction(transaction);
         if (FilledLenght < 10) FilledLenght++;
-        _transactionIOQueue.Enqueue(transaction);
+        _transactionIoQueue.Enqueue(transaction);
     }
     
 
-    private void PersistClientData()
+    private void UpdateRoutine()
     {
-        _fileStream ??= File.OpenWrite($"./data/{Id}.capv");
-        _fileStream.Position = 4;
+        var value = 0;
         var writeBuffer = new byte[4];
-        var newValue = BitConverter.GetBytes(Value);
-        writeBuffer[0] = newValue[0];
-        writeBuffer[1] = newValue[1];
-        writeBuffer[2] = newValue[2];
-        writeBuffer[3] = newValue[3];
-        _fileStream.Write(writeBuffer);
-    }
-    
-    private void PersistTransactionData()
-    {
+        FileStream? stream = null;
         while (true)
         {
-            if (_transactionIOQueue.IsEmpty || !_transactionIOQueue.TryDequeue(out var transaction))
+            if (_clientIoQueue.IsEmpty || !_clientIoQueue.TryDequeue(out value))
             {
-                Thread.Sleep(TimeSpan.FromSeconds(1));
+                Thread.Sleep(1);  
                 continue;
             }
+            stream ??= File.OpenWrite(_storagePath);
+            stream.Position = 4;
+            var newValue = BitConverter.GetBytes(value);
+            writeBuffer[0] = newValue[0];
+            writeBuffer[1] = newValue[1];
+            writeBuffer[2] = newValue[2];
+            writeBuffer[3] = newValue[3];
+            stream.Write(writeBuffer);
+            if (!_clientIoQueue.IsEmpty) continue;
+            stream.Close();
+            stream.Dispose();
+            stream = null;
+        }
+    }
+    
+    private void CreateTransactionRoutine()
+    {
+        FileStream? transactionStream = null; 
+        while (true)
+        {
+            if (_transactionIoQueue.IsEmpty || !_transactionIoQueue.TryDequeue(out var transaction))
+            {
+                Thread.Sleep(1);
+                continue;
+            }
+            transactionStream ??= File.Open(_transactionStoragePath, FileMode.Append);
             var size = 18 + transaction.Description.Length * 2;
-            using var transactionFile = File.Open($"./data/{Id}-transactions.capv", FileMode.Append);
             var buffer = new byte[size];
             var valuebytes = BitConverter.GetBytes(transaction.Value);
             buffer[0] = valuebytes[0];
@@ -122,16 +154,76 @@ public class Client
             buffer[pos] = dateBytes[6];
             pos++;
             buffer[pos] = dateBytes[7];
-            transactionFile.Write(buffer);
+            transactionStream.Write(buffer);
+            if (!_transactionIoQueue.IsEmpty) continue;
+            transactionStream.Close();
+            transactionStream.Dispose();
+            transactionStream = null;
+        }
+    }
+
+    private void CreateDiskStorageData()
+    {
+        using var clientStream = File.Create(_storagePath);
+        using var transactionStream = File.Create(_transactionStoragePath);
+        var writeBuffer = new byte[8];
+        var limitBytes = BitConverter.GetBytes(Limit);
+        writeBuffer[0] = limitBytes[0];
+        writeBuffer[1] = limitBytes[1];
+        writeBuffer[2] = limitBytes[2];
+        writeBuffer[3] = limitBytes[3];
+        var valueBytes = BitConverter.GetBytes(Value);
+        writeBuffer[4] = valueBytes[0];
+        writeBuffer[5] = valueBytes[1];
+        writeBuffer[6] = valueBytes[2];
+        writeBuffer[7] = valueBytes[3];
+        clientStream.Write(writeBuffer);
+    }
+    
+    private void GetDiskStorageData()
+    { 
+        using var readStream = File.OpenRead(_storagePath);
+        if (readStream.Length != 8)
+        {
+            CreateDiskStorageData();
+            return;
+        }
+        var buffer = new byte[8];   
+        _ = readStream.Read(buffer);
+        Limit = BitConverter.ToInt32(buffer, 0);
+        Value = BitConverter.ToInt32(buffer, 4);
+        if (!File.Exists(_transactionStoragePath))
+        {
+            using var stream = File.Create(_transactionStoragePath);
+            return;
+        }
+        using var transactionReadStream = File.OpenRead(_transactionStoragePath);
+        if (transactionReadStream.Length == 0) return; 
+        var transactionBuffer = new byte[transactionReadStream.Length];
+        _ = transactionReadStream.Read(transactionBuffer);
+        var position = 0;
+        for (var i = 0; i < 10; i++)
+        {
+            var value = BitConverter.ToInt32(transactionBuffer, position);
+            position += 4;
+            var type = BitConverter.ToChar(transactionBuffer, position);
+            position += 2;
+            var size = BitConverter.ToInt32(transactionBuffer, position);
+            position += 4;
+            var description = new StringBuilder(size);
+            for (var j = 0; j < size; j++)
+            {
+                description.Append(BitConverter.ToChar(transactionBuffer, position));
+                position += 2;
+            }
+            var createdAt = BitConverter.ToInt64(transactionBuffer, position);
+            position += 8;
+            Transactions.AppendTransaction(new Transaction(value, type, description.ToString(), DateTime.FromBinary(createdAt)));
+            FilledLenght++;
+            if (position == transactionReadStream.Length) break;
         }
     }
 };
 
 public readonly record struct Transaction(int Value, char Type, string Description, DateTime CreatedAt);
-
-public class TransactionRequest(int[] parameters, string description, NetworkStream stream)
-{
-    public int[] Parameters { get; } = parameters;
-    public string Description { get; } = description;
-};
 
