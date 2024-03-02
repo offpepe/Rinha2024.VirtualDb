@@ -1,4 +1,5 @@
 ﻿/.idea
 /bin
 /obj
+/data
 *.DotSettings.*

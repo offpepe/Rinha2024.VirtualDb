@@ -3,13 +3,12 @@
 public static class PacketBuilder
 {
     
-    public static byte[] WriteMessage(int[] message)
+    public static byte[] WriteMessage((int, int) message)
     {
+        var (value, limit) = message; 
         using var ms = new MemoryStream(8);
-        foreach (var item in message)
-        {
-            ms.Write(BitConverter.GetBytes(item));
-        }
+        ms.Write(BitConverter.GetBytes(value));
+        ms.Write(BitConverter.GetBytes(limit));
         return ms.ToArray();
     }
     
