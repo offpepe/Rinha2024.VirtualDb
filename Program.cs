@@ -18,7 +18,8 @@ public class Program
 
     public static void Main()
     {
-        Directory.CreateDirectory("data");
+        var storageFolder = Environment.GetEnvironmentVariable("storage_folder") ?? "./data";
+        if (!Directory.Exists(storageFolder)) Directory.CreateDirectory(storageFolder);
         SetupClients();
         for (var i = 0; i < ListenerNum; i++)
         {

@@ -1,6 +1,5 @@
 ﻿using System.Collections.Concurrent;
 using System.Diagnostics.CodeAnalysis;
-using System.Net.Sockets;
 using System.Text;
 using Rinha2024.VirtualDb.Extensions;
 
@@ -29,8 +28,8 @@ public class Client
         new Thread(UpdateRoutine).Start();
     }
     public int Id { get; init; }
-    public int Value { get; set; }
-    public int Limit { get; set; }
+    public int Value { get; private set; }
+    public int Limit { get; private set; }
     
     public int FilledLenght;
     public Transaction[] Transactions { get; } = new Transaction[10];
@@ -64,7 +63,6 @@ public class Client
             _lock.Exit();
         }
     }
-    
 
     private void AddTransaction(Transaction transaction)
     {
